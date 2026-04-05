@@ -33,16 +33,6 @@ var (
 	defaultExpiry = uint32(100)
 
 	defaultDepositConfirmations = uint32(3)
-
-	confChan = make(chan *chainntnfs.TxConfirmation)
-
-	confErrChan = make(chan error)
-
-	blockChan = make(chan int32)
-
-	blockErrChan = make(chan error)
-
-	finalizedDepositChan = make(chan wire.OutPoint)
 )
 
 type mockStaticAddressClient struct {
@@ -229,48 +219,89 @@ func (m *MockChainNotifier) RegisterSpendNtfn(ctx context.Context,
 // TestManager checks that the manager processes the right channel notifications
 // while a deposit is expiring.
 func TestManager(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	const defaultTimeout = 30 * time.Second
 
 	// Create the test context with required mocks.
 	testContext := newManagerTestContext(t)
 
 	// Start the deposit manager.
 	initChan := make(chan struct{})
+	runErrChan := make(chan error, 1)
 	go func() {
-		require.NoError(t, testContext.manager.Run(ctx, initChan))
+		runErrChan <- testContext.manager.Run(ctx, initChan)
 	}()
 
 	// Ensure that the manager has been initialized.
-	<-initChan
+	select {
+	case <-initChan:
+	case err := <-runErrChan:
+		require.NoError(t, err, "manager failed to start")
+
+	case <-time.After(defaultTimeout):
+		t.Fatal("manager timed out starting")
+	}
 
 	// Notify about the last block before the expiry.
-	blockChan <- int32(defaultDepositConfirmations + defaultExpiry)
+	testContext.blockChan <- int32(
+		defaultDepositConfirmations + defaultExpiry - 1,
+	)
 
 	// Ensure that the deposit state machine didn't sign for the expiry tx.
 	select {
 	case <-testContext.mockLnd.SignOutputRawChannel:
 		t.Fatal("received unexpected sign request")
 
-	default:
+	case <-time.After(defaultTimeout):
 	}
 
 	// Mine the expiry tx height.
-	blockChan <- int32(defaultDepositConfirmations + defaultExpiry)
+	testContext.blockChan <- int32(
+		defaultDepositConfirmations + defaultExpiry,
+	)
 
-	// Ensure that the deposit state machine didn't sign for the expiry tx.
-	<-testContext.mockLnd.SignOutputRawChannel
+	// Ensure that the deposit state machine signed the expiry tx.
+	select {
+	case <-testContext.mockLnd.SignOutputRawChannel:
+
+	case <-time.After(defaultTimeout):
+		t.Fatal("did not receive sign request")
+	}
 
 	// Ensure that the signed expiry transaction is published.
-	expiryTx := <-testContext.mockLnd.TxPublishChannel
+	var expiryTx *wire.MsgTx
+	select {
+	case expiryTx = <-testContext.mockLnd.TxPublishChannel:
+
+	case <-time.After(defaultTimeout):
+		t.Fatal("did not receive published expiry tx")
+	}
 
 	// Ensure that the deposit is waiting for a confirmation notification.
-	confChan <- &chainntnfs.TxConfirmation{
+	testContext.confChan <- &chainntnfs.TxConfirmation{
 		BlockHeight: defaultDepositConfirmations + defaultExpiry + 3,
 		Tx:          expiryTx,
 	}
 
-	// Ensure that the deposit is finalized.
-	<-finalizedDepositChan
+	// Ensure that the manager observed the finalization and removed the
+	// deposit from its active set.
+	require.Eventually(t, func() bool {
+		testContext.manager.mu.Lock()
+		defer testContext.manager.mu.Unlock()
+
+		return len(testContext.manager.activeDeposits) == 0
+	}, defaultTimeout, 10*time.Millisecond)
+
+	cancel()
+	select {
+	case err := <-runErrChan:
+		require.ErrorIs(t, err, context.Canceled)
+
+	case <-time.After(defaultTimeout):
+		t.Fatal("manager did not stop")
+	}
 }
 
 // ManagerTestContext is a helper struct that contains all the necessary
@@ -281,6 +312,10 @@ type ManagerTestContext struct {
 	mockLnd                 *test.LndMockServices
 	mockStaticAddressClient *mockStaticAddressClient
 	mockAddressManager      *mockAddressManager
+	confChan                chan *chainntnfs.TxConfirmation
+	confErrChan             chan error
+	blockChan               chan int32
+	blockErrChan            chan error
 }
 
 // newManagerTestContext creates a new test context for the reservation manager.
@@ -292,6 +327,10 @@ func newManagerTestContext(t *testing.T) *ManagerTestContext {
 	mockAddressManager := new(mockAddressManager)
 	mockStore := new(mockStore)
 	mockChainNotifier := new(MockChainNotifier)
+	confChan := make(chan *chainntnfs.TxConfirmation)
+	confErrChan := make(chan error)
+	blockChan := make(chan int32)
+	blockErrChan := make(chan error)
 
 	ID, err := GetRandomDepositID()
 	utxo := &lnwallet.Utxo{
@@ -353,7 +392,6 @@ func newManagerTestContext(t *testing.T) *ManagerTestContext {
 	}
 
 	manager := NewManager(cfg)
-	manager.finalizedDepositChan = finalizedDepositChan
 
 	testContext := &ManagerTestContext{
 		manager:                 manager,
@@ -361,6 +399,10 @@ func newManagerTestContext(t *testing.T) *ManagerTestContext {
 		mockLnd:                 mockLnd,
 		mockStaticAddressClient: mockStaticAddressClient,
 		mockAddressManager:      mockAddressManager,
+		confChan:                confChan,
+		confErrChan:             confErrChan,
+		blockChan:               blockChan,
+		blockErrChan:            blockErrChan,
 	}
 
 	staticAddress := generateStaticAddress(
