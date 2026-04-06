@@ -453,6 +453,22 @@ var staticAddressLoopInCommand = &cli.Command{
 				"higher fee, so the change output is " +
 				"available sooner",
 		},
+		&cli.Uint64Flag{
+			Name: "max_swap_fee_sat",
+			Usage: fmt.Sprintf("the maximum swap fee in satoshis. "+
+				"If set, the swap is rejected when the quoted "+
+				"fee exceeds this cap. The maximum allowed "+
+				"value is %d. On-chain fees for creating "+
+				"static deposits are unaffected.",
+				maxSwapFeeSatLimit),
+		},
+		&cli.Uint64Flag{
+			Name: "max_swap_fee_ppm",
+			Usage: "the maximum swap fee expressed in " +
+				"parts per million of the swap amount. " +
+				"If set together with --max_swap_fee_sat " +
+				"the tighter cap is used.",
+		},
 		lastHopFlag,
 		labelFlag,
 		routeHintsFlag,
@@ -585,7 +601,18 @@ func staticAddressLoopIn(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	limits := getInLimits(quote)
+	// Resolve the effective swap fee cap. When the user provides
+	// --max_swap_fee_sat and/or --max_swap_fee_ppm the tighter of
+	// the two is used and checked against the current quote. Without
+	// overrides the quoted fee is forwarded as before.
+	maxSwapFee, err := resolveMaxSwapFee(
+		quoteReq, quote,
+		cmd.IsSet("max_swap_fee_sat"), cmd.Uint64("max_swap_fee_sat"),
+		cmd.IsSet("max_swap_fee_ppm"), cmd.Uint64("max_swap_fee_ppm"),
+	)
+	if err != nil {
+		return err
+	}
 
 	if !(cmd.Bool("force") || cmd.Bool("f")) {
 		err = displayInDetails(quoteReq, quote, cmd.Bool("verbose"))
@@ -601,7 +628,7 @@ func staticAddressLoopIn(ctx context.Context, cmd *cli.Command) error {
 	req := &looprpc.StaticAddressLoopInRequest{
 		Amount:                quoteReq.Amt,
 		Outpoints:             depositOutpoints,
-		MaxSwapFeeSatoshis:    int64(limits.maxSwapFee),
+		MaxSwapFeeSatoshis:    int64(maxSwapFee),
 		LastHop:               lastHop,
 		Label:                 label,
 		Initiator:             defaultInitiator,
