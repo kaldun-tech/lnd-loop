@@ -85,6 +85,8 @@ loopd --network=testnet
 ### Submit feature requests
 The [GitHub issue tracker](https://github.com/lightninglabs/loop/issues) can be
 used to request specific improvements or report bugs.
+Do not use public issues for security disclosures.
+Follow the instructions in [SECURITY.md](./SECURITY.md).
 
 ### Join us on Slack
 Join us on the
