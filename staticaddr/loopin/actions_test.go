@@ -7,16 +7,22 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/wire"
 	"github.com/lightninglabs/lndclient"
 	"github.com/lightninglabs/loop/fsm"
 	"github.com/lightninglabs/loop/staticaddr/address"
 	"github.com/lightninglabs/loop/staticaddr/deposit"
 	"github.com/lightninglabs/loop/staticaddr/script"
 	"github.com/lightninglabs/loop/staticaddr/version"
+	"github.com/lightninglabs/loop/swap"
+	"github.com/lightninglabs/loop/swapserverrpc"
 	"github.com/lightninglabs/loop/test"
 	"github.com/lightningnetwork/lnd/invoices"
 	"github.com/lightningnetwork/lnd/lntypes"
+	"github.com/lightningnetwork/lnd/zpay32"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
 )
 
 // TestMonitorInvoiceAndHtlcTxReRegistersOnConfErr ensures that an error from
@@ -121,6 +127,148 @@ func TestMonitorInvoiceAndHtlcTxReRegistersOnConfErr(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatalf("fsm did not return: %v", ctx.Err())
 	}
+}
+
+// TestInitHtlcActionPreservesRouteHints asserts that static-address loop-in
+// propagates explicit route hints into the encoded swap invoice sent to the
+// server. This currently fails because lndclient.AddInvoice drops route hints.
+func TestInitHtlcActionPreservesRouteHints(t *testing.T) {
+	t.Parallel()
+
+	mockLnd := test.NewMockLnd()
+	_, serverKey := test.CreateKey(21)
+
+	server := &mockStaticAddressServer{
+		response: testStaticAddressLoopInResponse(
+			serverKey.SerializeCompressed(),
+		),
+	}
+
+	dep := &deposit.Deposit{
+		OutPoint: wire.OutPoint{
+			Hash:  chainhash.Hash{1},
+			Index: 0,
+		},
+		Value: 500_000,
+	}
+
+	loopIn := &StaticAddressLoopIn{
+		Deposits:              []*deposit.Deposit{dep},
+		DepositOutpoints:      []string{dep.OutPoint.String()},
+		SelectedAmount:        dep.Value,
+		QuotedSwapFee:         1_000,
+		RouteHints:            testStaticAddressRouteHints(),
+		InitiationHeight:      uint32(mockLnd.Height),
+		InitiationTime:        time.Now(),
+		PaymentTimeoutSeconds: 3_600,
+	}
+
+	f := &FSM{
+		StateMachine: &fsm.StateMachine{},
+		cfg: &Config{
+			Server:                               server,
+			DepositManager:                       &noopDepositManager{},
+			LndClient:                            mockLnd.Client,
+			WalletKit:                            mockLnd.WalletKit,
+			ChainParams:                          mockLnd.ChainParams,
+			Store:                                &mockStore{},
+			ValidateLoopInContract:               testValidateLoopInContract,
+			MaxStaticAddrHtlcFeePercentage:       1,
+			MaxStaticAddrHtlcBackupFeePercentage: 1,
+		},
+		loopIn: loopIn,
+	}
+
+	event := f.InitHtlcAction(t.Context(), nil)
+	require.Equal(t, OnHtlcInitiated, event)
+	require.Nil(t, f.LastActionError)
+	require.NotNil(t, server.request)
+
+	_, routeHints, _, _, err := swap.DecodeInvoice(
+		mockLnd.ChainParams, server.request.SwapInvoice,
+	)
+	require.NoError(t, err)
+
+	test.RequireRouteHintsEqual(t, loopIn.RouteHints, routeHints)
+}
+
+// mockStaticAddressServer captures static-address loop-in requests in tests.
+type mockStaticAddressServer struct {
+	swapserverrpc.StaticAddressServerClient
+
+	request  *swapserverrpc.ServerStaticAddressLoopInRequest
+	response *swapserverrpc.ServerStaticAddressLoopInResponse
+}
+
+// ServerStaticAddressLoopIn records the request and returns the prepared
+// response.
+func (m *mockStaticAddressServer) ServerStaticAddressLoopIn(
+	_ context.Context, in *swapserverrpc.ServerStaticAddressLoopInRequest,
+	_ ...grpc.CallOption) (*swapserverrpc.ServerStaticAddressLoopInResponse,
+	error) {
+
+	m.request = in
+
+	return m.response, nil
+}
+
+// testStaticAddressLoopInResponse returns a minimal successful server response
+// for InitHtlcAction tests.
+func testStaticAddressLoopInResponse(
+	serverPubKey []byte) *swapserverrpc.ServerStaticAddressLoopInResponse {
+
+	signingInfo := &swapserverrpc.ServerHtlcSigningInfo{
+		FeeRate: 1,
+	}
+
+	return &swapserverrpc.ServerStaticAddressLoopInResponse{
+		HtlcServerPubKey:   serverPubKey,
+		HtlcExpiry:         1_000,
+		StandardHtlcInfo:   signingInfo,
+		HighFeeHtlcInfo:    signingInfo,
+		ExtremeFeeHtlcInfo: signingInfo,
+	}
+}
+
+// testStaticAddressRouteHints returns deterministic route hints for static
+// loop-in invoice regression tests.
+func testStaticAddressRouteHints() [][]zpay32.HopHint {
+	_, pubKey1 := test.CreateKey(31)
+	_, pubKey2 := test.CreateKey(32)
+	_, pubKey3 := test.CreateKey(33)
+
+	return [][]zpay32.HopHint{
+		{
+			{
+				NodeID:                    pubKey1,
+				ChannelID:                 11,
+				FeeBaseMSat:               101,
+				FeeProportionalMillionths: 201,
+				CLTVExpiryDelta:           31,
+			},
+			{
+				NodeID:                    pubKey2,
+				ChannelID:                 12,
+				FeeBaseMSat:               102,
+				FeeProportionalMillionths: 202,
+				CLTVExpiryDelta:           32,
+			},
+		},
+		{
+			{
+				NodeID:                    pubKey3,
+				ChannelID:                 13,
+				FeeBaseMSat:               103,
+				FeeProportionalMillionths: 203,
+				CLTVExpiryDelta:           33,
+			},
+		},
+	}
+}
+
+// testValidateLoopInContract accepts all server contract parameters in tests.
+func testValidateLoopInContract(_ int32, _ int32) error {
+	return nil
 }
 
 // mockAddressManager is a minimal AddressManager implementation used by the
