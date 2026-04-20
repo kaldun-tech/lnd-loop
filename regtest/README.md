@@ -227,9 +227,6 @@ Let's list the deposits in the loop client:
 These deposits can now be instantly swapped. Let's use the first one:
 ```shell
 ./regtest.sh loop static in --utxo 5405e5cae38f9e4e193f7b5442dd005273e2e1fab8687c42a505c1a333e8884f:0
-On-chain fees for static address loop-ins are not included.
-They were already paid when the deposits were created.
-
 Previously deposited on-chain:             250000 sat
 Receive off-chain:                         249614 sat
 Estimated total fee:                          386 sat
@@ -266,9 +263,6 @@ We can combine the remaining two deposits in another instant swap by specifying
 the `--all` flag:
 ```shell
 ./regtest.sh loop static in --all                                                                     ✔  12:07:28 
-On-chain fees for static address loop-ins are not included.
-They were already paid when the deposits were created.
-
 Previously deposited on-chain:             500000 sat
 Receive off-chain:                         499302 sat
 Estimated total fee:                          698 sat
