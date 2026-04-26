@@ -526,17 +526,17 @@ func (m *Manager) WithdrawDeposits(ctx context.Context,
 
 		// Get static address pkScript for handleWithdrawal.
 		addrParams, err := m.cfg.AddressManager.GetStaticAddressParameters(ctx)
-		if err != nil {
-			log.Errorf("Failed to get address params: %v", err)
-			// Return success - tx published and state persisted.
-			// handleWithdrawal will be picked up on restart via
-			// recovery.
-		} else {
+		if err == nil {
 			// Best-effort monitoring - runs async, doesn't block.
 			m.handleWithdrawal(
 				ctx, deposits, finalizedTx.TxHash(),
 				withdrawalPkScript, addrParams.PkScript,
 			)
+		} else {
+			log.Errorf("Failed to get address params: %v", err)
+			// Return success - tx published and state persisted.
+			// handleWithdrawal will be picked up on restart via
+			// recovery.
 		}
 	}
 
