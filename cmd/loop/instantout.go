@@ -88,6 +88,12 @@ func instantOut(ctx context.Context, cmd *cli.Command) error {
 	fmt.Printf("Available reservations: \n\n")
 	for _, res := range confirmedReservations {
 		idx++
+		if len(res.ReservationId) != reservation.IdLength {
+			return fmt.Errorf("invalid reservation id length: "+
+				"got %d, expected %d", len(res.ReservationId),
+				reservation.IdLength)
+		}
+
 		fmt.Printf("Reservation %v: shortid %x, amt %v, expiry "+
 			"height %v \n", idx, res.ReservationId[:3], res.Amount,
 			res.Expiry)
@@ -131,7 +137,7 @@ func instantOut(ctx context.Context, cmd *cli.Command) error {
 			if err != nil {
 				return err
 			}
-			if idx < 0 {
+			if idx <= 0 {
 				return fmt.Errorf("invalid index %v", idx)
 			}
 
