@@ -10,6 +10,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightninglabs/lndclient"
 	"github.com/lightninglabs/loop/loopdb"
+	"github.com/lightninglabs/loop/swap"
 	"github.com/lightninglabs/loop/test"
 	"github.com/lightninglabs/loop/utils"
 	"github.com/lightningnetwork/lnd/chainntnfs"
@@ -17,6 +18,7 @@ import (
 	invpkg "github.com/lightningnetwork/lnd/invoices"
 	"github.com/lightningnetwork/lnd/lntypes"
 	"github.com/lightningnetwork/lnd/routing/route"
+	"github.com/lightningnetwork/lnd/zpay32"
 	"github.com/stretchr/testify/require"
 )
 
@@ -122,6 +124,39 @@ func TestLoopInSuccess(t *testing.T) {
 
 		testLoopInSuccess(t)
 	})
+}
+
+// TestLoopInSwapInvoiceRouteHintsMatchProbe asserts that explicit route hints
+// are preserved on both loop-in invoices. The probe invoice already keeps the
+// requested hints, while the swap invoice currently loses them via the
+// lndclient AddInvoice wrapper.
+func TestLoopInSwapInvoiceRouteHintsMatchProbe(t *testing.T) {
+	t.Parallel()
+
+	ctx := newLoopInTestContext(t)
+	cfg := newSwapConfig(
+		&ctx.lnd.LndServices, ctx.store, ctx.server, nil,
+		clock.NewTestClock(time.Unix(123, 0)),
+	)
+
+	req := testLoopInRequest
+	req.RouteHints = testLoopInRouteHints()
+
+	_, err := newLoopInSwap(t.Context(), cfg, 600, &req)
+	require.NoError(t, err)
+
+	_, swapRouteHints, _, _, err := swap.DecodeInvoice(
+		ctx.lnd.ChainParams, ctx.server.swapInvoice,
+	)
+	require.NoError(t, err)
+
+	_, probeRouteHints, _, _, err := swap.DecodeInvoice(
+		ctx.lnd.ChainParams, ctx.server.probeInvoice,
+	)
+	require.NoError(t, err)
+
+	test.RequireRouteHintsEqual(t, req.RouteHints, probeRouteHints)
+	test.RequireRouteHintsEqual(t, probeRouteHints, swapRouteHints)
 }
 
 func testLoopInSuccess(t *testing.T) {
@@ -231,6 +266,42 @@ func testLoopInSuccess(t *testing.T) {
 	ctx.store.AssertLoopInState(loopdb.StateSuccess)
 
 	require.NoError(t, <-errChan)
+}
+
+// testLoopInRouteHints returns deterministic explicit route hints that can be
+// encoded into loop-in invoices for regression tests.
+func testLoopInRouteHints() [][]zpay32.HopHint {
+	_, pubKey1 := test.CreateKey(11)
+	_, pubKey2 := test.CreateKey(12)
+	_, pubKey3 := test.CreateKey(13)
+
+	return [][]zpay32.HopHint{
+		{
+			{
+				NodeID:                    pubKey1,
+				ChannelID:                 1,
+				FeeBaseMSat:               10,
+				FeeProportionalMillionths: 20,
+				CLTVExpiryDelta:           30,
+			},
+			{
+				NodeID:                    pubKey2,
+				ChannelID:                 2,
+				FeeBaseMSat:               11,
+				FeeProportionalMillionths: 21,
+				CLTVExpiryDelta:           31,
+			},
+		},
+		{
+			{
+				NodeID:                    pubKey3,
+				ChannelID:                 3,
+				FeeBaseMSat:               12,
+				FeeProportionalMillionths: 22,
+				CLTVExpiryDelta:           32,
+			},
+		},
+	}
 }
 
 // TestLoopInTimeout tests scenarios where the server doesn't sweep the htlc

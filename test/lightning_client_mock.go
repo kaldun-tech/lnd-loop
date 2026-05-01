@@ -105,11 +105,17 @@ func (h *mockLightningClient) AddInvoice(ctx context.Context,
 	// Create and encode the payment request as a bech32 (zpay32) string.
 	creationDate := time.Now()
 
-	payReq, err := zpay32.NewInvoice(
-		h.lnd.ChainParams, hash, creationDate,
+	options := []func(*zpay32.Invoice){
 		zpay32.Description(in.Memo),
 		zpay32.CLTVExpiry(in.CltvExpiry),
 		zpay32.Amount(in.Value),
+	}
+	for _, routeHint := range in.RouteHints {
+		options = append(options, zpay32.RouteHint(routeHint))
+	}
+
+	payReq, err := zpay32.NewInvoice(
+		h.lnd.ChainParams, hash, creationDate, options...,
 	)
 	if err != nil {
 		return lntypes.Hash{}, "", err
